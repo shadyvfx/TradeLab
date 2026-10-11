@@ -30,7 +30,9 @@ import { validateRegistration, validateSignIn } from '../core/accounts.js';
 import { refreshQuotes } from './marketDataService.js';
 import { cancelPending } from './tutorService.js';
 
-export const SERVER_COMMAND = 'python -m flask --app backend.app run --host 127.0.0.1 --port 5000';
+// TradeLab's server (Flask on a production server). On Windows, the command is python serve.py.
+export const SERVER_COMMAND = 'python3 serve.py';
+export const SERVER_URL = 'http://127.0.0.1:5001';
 
 export class AccountError extends Error {
   /**
@@ -76,7 +78,7 @@ function toAccountError(error) {
   if (error instanceof ApiError) {
     if (isUnavailable(error)) {
       setUser(null, 'unavailable');
-      return new AccountError(`Can't reach the account server, so nothing was saved. Run ${SERVER_COMMAND} and open http://127.0.0.1:5000, then try again.`, {
+      return new AccountError(`Can't reach the account server, so nothing was saved. Run ${SERVER_COMMAND} and open ${SERVER_URL}, then try again.`, {
         code: 'accounts_unavailable',
         unavailable: true,
       });

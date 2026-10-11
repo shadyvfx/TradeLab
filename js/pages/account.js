@@ -26,6 +26,7 @@ import {
   accountInitials,
   AccountError,
   SERVER_COMMAND,
+  SERVER_URL,
 } from '../services/accountService.js';
 
 const FIELD_LABELS = {
@@ -248,7 +249,7 @@ function page(state) {
 const unavailableStatus = () => ({
   tone: 'warn',
   title: "The account server isn't running",
-  text: html`Sign-up and sign-in need the Flask server, which also connects the AI tutor to this website. Run <code>${SERVER_COMMAND}</code> in the TradeLab folder and open <code>http://127.0.0.1:5000</code>, then check again.`,
+  text: html`Sign-up and sign-in need the TradeLab server, which also connects the AI tutor to this website. Run <code>${SERVER_COMMAND}</code> in the TradeLab folder (on Windows, <code>python serve.py</code>) and open <code>${SERVER_URL}</code>, then check again.`,
   retry: true,
 });
 

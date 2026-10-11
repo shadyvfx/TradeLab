@@ -2,7 +2,7 @@
 
 The frontend keeps market, account, lesson-progress, and journal features on their existing mock implementations. Flask serves the frontend and provides the tutor endpoint, which forwards chat requests to a locally hosted llama.cpp model.
 
-Flask (`backend/app.py`) serves the frontend, the tutor endpoint, and the account endpoints backed by `server/accounts.py` and a SQLite database. The account server (`python scripts/dev_server.py`) remains available as a standard-library-only option when the Qwen tutor is not needed. The other endpoints below remain future integration contracts; do not set the global `dataSource` to `'api'` until those endpoints exist.
+Flask (`backend/app.py`) serves the frontend, the tutor endpoint, and the account endpoints backed by `server/accounts.py` and a SQLite database: sign-up, sign-in, guest limits, the email checker, account-only lessons and saving each account's progress; see [Accounts](#accounts). `serve.py` runs it on a production server, with HTTPS when you want it ([deployment.md](deployment.md)). The account server (`python scripts/dev_server.py`) remains available as a standard-library-only option when the Qwen tutor is not needed. The other endpoints below remain future integration contracts; do not set the global `dataSource` to `'api'` until those endpoints exist.
 
 1. [Switching the tutor between local Qwen and mock responses](#1-switching-the-tutor-between-local-qwen-and-mock-responses)
 2. [Serving the frontend from Flask](#2-serving-the-frontend-from-flask)
@@ -48,7 +48,7 @@ implemented.
 | Account-required lesson bodies | Flask (`GET /api/lessons/:lessonId`) after session authorization | Same |
 | Preferences, tutor conversation, notifications | Saved progress | localStorage |
 | Sidebar state | localStorage (`tradelab:v1:device`) | localStorage |
-| User accounts and sign-in | Flask account API + SQLite (`tradelab.db`) | Same; always on the server |
+| User accounts and sign-in | Flask account API (or the account server) + SQLite (`tradelab.db`) | Same; always on the server |
 
 In mock mode, **saved progress** belongs to whoever is using TradeLab. Signed in, it is the account's document in the `user_data` table, loaded with `GET /api/me/data` and saved with `PUT /api/me/data` (see [Accounts](#accounts)). Signed out, it is a guest copy in this browser's localStorage (`tradelab:v1`). Signing in or out swaps one for the other, so one person's progress never shows for another.
 
@@ -109,28 +109,36 @@ In another PowerShell window, from the project root, run Flask. It serves the fr
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-python -m flask --app backend.app run --host 127.0.0.1 --port 5000
+python serve.py --port 5000
 ```
 
-Open `http://127.0.0.1:5000/`. Flask serves the HTML, stylesheets, JavaScript
-modules, assets, SQLite-backed account routes (`/api/users`, `/api/session`,
+Open `http://127.0.0.1:5000/`. `serve.py` runs the Flask app on TradeLab's
+production server. Flask serves the HTML, stylesheets, JavaScript modules,
+assets, SQLite-backed account routes (`/api/users`, `/api/session`,
 `/api/email-check`, and `/api/me/data`), guest-quota routes under
 `/api/guest/*`, protected lesson bodies at `/api/lessons/<id>`, and
 `/api/tutor/chat`. The browser calls these APIs on the same origin; Flask
 alone calls llama.cpp. Accounts and guest quota counters are stored in
 `tradelab.db` in the project folder by default. Set `TRADELAB_DB` before
-starting Flask to use another database file.
+starting the server to use another database file. For HTTPS and hosting, see
+[deployment.md](deployment.md). While developing, Flask's own server works
+too: `python -m flask --app backend.app run --port 5000`.
 
-Test the endpoint from PowerShell:
+Test the endpoint from PowerShell. The tutor needs a signed-in account, so sign
+in first with an account you created on the site:
 
 ```powershell
+$login = @{ login = "your_username"; password = "Your-password1" } | ConvertTo-Json
+Invoke-RestMethod -Uri "http://127.0.0.1:5000/api/session" -Method Post `
+  -ContentType "application/json" -Body $login -SessionVariable tradelab | Out-Null
+
 $body = @{
   messages = @(@{ role = "user"; content = "Explain candlestick charts to me." })
   context = @{ level = "beginner"; route = "tutor" }
 } | ConvertTo-Json -Depth 5
 
 Invoke-RestMethod -Uri "http://127.0.0.1:5000/api/tutor/chat" `
-  -Method Post -ContentType "application/json" -Body $body
+  -Method Post -ContentType "application/json" -Body $body -WebSession $tradelab
 ```
 
 Use Qwen with `tutorApiEnabled: true` (the default), or set it to `false` in
@@ -199,6 +207,7 @@ Where messages appear: a 400 from `POST /api/orders` appears under the order tic
 | `forbidden_origin` | 403 | A change requested from another website |
 | `payload_too_large` | 413 | A request body over its limit (16 KB, or 2 MB for saved progress) |
 | `unsupported_media_type` | 415 | A request body that isn't JSON |
+| `rate_limited` | 429 | Too many sign-ins, sign-ups, email checks or tutor questions from one network; `Retry-After` gives the seconds to wait (Flask only) |
 | `accounts_unavailable` | 503 | The Node dev server, which has no user database |
 
 The first seven codes and their messages come from `js/core/orders.js`. The browser shows the same messages as a live preview while the learner types, so the server should return them unchanged.
@@ -269,6 +278,13 @@ stored server-side. Clearing the cookie creates a fresh anonymous session,
 which is an inherent limitation of anonymous identity rather than a secure
 anti-abuse identity.
 
+`GuestLimits`, as `GET /api/session`, `GET /api/guest/limits` and the guest
+endpoints return it:
+
+```json
+{ "simulationDaysUsed": 3, "simulationDaysRemaining": 18, "simulationDay": 18, "journalEntriesCreated": 1, "journalEntriesRemaining": 1 }
+```
+
 ### Journal (`js/services/journalService.js`)
 
 | Endpoint | Called by | Response |
@@ -286,7 +302,7 @@ Journal insights (plan rate, follow-through, outcomes after three closed entries
 
 | Endpoint | Called by | Response |
 | --- | --- | --- |
-| `POST /tutor/chat` | `sendMessage()` | JSON reply by default; the tutor requests SSE streaming with `"stream": true`. Replies without retrieved evidence use source `llm_unverified`. |
+| `POST /tutor/chat` | `sendMessage()` | JSON reply by default; the tutor requests SSE streaming with `"stream": true`. Replies without retrieved evidence use source `llm_unverified`. Needs a signed-in account: `401 account_required` otherwise. |
 
 ```json
 {
@@ -308,17 +324,22 @@ Journal insights (plan rate, follow-through, outcomes after three closed entries
 
 ### Accounts
 
-`js/services/accountService.js` calls these, and `scripts/dev_server.py` (with `server/accounts.py` and `server/email_check.py`) already implements them. The frontend uses them in every data mode, because passwords must never be stored in the browser.
+`js/services/accountService.js` calls these. Both the Flask app (`backend/app.py`) and `scripts/dev_server.py` implement them with `server/accounts.py` and `server/email_check.py`, so the messages, codes and database are the same. The frontend uses them in every data mode, because passwords must never be stored in the browser.
 
 | Endpoint | Called by | Response |
 | --- | --- | --- |
 | `POST /users` `{ username, email, password }` | Create account | `201 { user: User }` and a session cookie; `400 validation_failed` with `details.fields` (and `details.suggestions`); `409 username_taken` or `email_taken` with `field` |
 | `POST /session` `{ login, password }` | Sign in (`login` is a username or an email) | `{ user: User }` and a session cookie; `400 validation_failed`; `401 invalid_credentials` |
-| `GET /session` | `loadAccountSession()` at startup | `{ user: User }`, or `{ user: null }` when signed out |
+| `GET /session` | `loadAccountSession()` at startup | `{ user: User, guestLimits: null }`, or `{ user: null, guestLimits: GuestLimits }` when signed out, with a new guest cookie the first time ([Guest limits](#guest-limits)) |
 | `DELETE /session` | Sign out, after the last changes are saved | `204`, and the cookie is cleared |
 | `POST /email-check` `{ email }` | The sign-up form, 0.6 seconds after you stop typing an email | `EmailCheck` (below) |
 | `GET /me/data` | Signing in, and startup when already signed in (mock mode) | `{ data: SavedProgress, updatedAt }`; `data` and `updatedAt` are `null` before the first save; `401 not_signed_in` |
 | `PUT /me/data` `{ data: SavedProgress }` | About a second after each change while signed in (mock mode), and right away when the tab is hidden or closed | `{ updatedAt }`; `400 invalid_request`; `401 not_signed_in`; `413 payload_too_large` |
+| `GET /guest/limits` | Re-reading the guest's server-owned simulation clock | `{ authenticated: false, limits: GuestLimits }`, or `{ authenticated: true, limits: null }` when signed in |
+| `POST /guest/simulation/advance` `{ days }` | Advance 1 day (`1`) or 1 week (`5`) as a guest | `{ authenticated: false, grantedDays, limitReached, limits }`; `403 guest_simulation_limit`; `401 guest_session_required` |
+| `POST /guest/journal/entries` `{}` | Creating a journal entry as a guest | `{ authenticated: false, limits }`; `403 guest_journal_limit`; `401 guest_session_required` |
+| `GET /lessons/:lessonId` | Opening an account-only lesson | `{ lesson }`; `403 course_account_required` for guests; `404 lesson_not_found` |
+| `GET /lessons/:lessonId/access` | Checking access before opening a lesson | `{ allowed: true, lessonId }`; `403 course_account_required`; `404 lesson_not_found` |
 
 ```json
 { "id": 3, "username": "ay_0b", "displayName": "ay_0b", "email": "ay@example.com", "createdAt": "2026-10-09T22:34:05.790423+00:00" }
@@ -347,7 +368,7 @@ Rules, checked in the browser (`js/core/accounts.js`) and again on the server (`
 
 1. **Typos of popular providers:** one slip (a missing, extra, wrong or swapped character) from gmail.com, yahoo.com, hotmail.com, outlook.com, icloud.com and a few others. Domains of 10 or more characters may have two slips if the ending matches, so hotmial1.com is caught but hotmail.ca, a real Microsoft domain, is not. Typo-squatters register these domains and give them mail servers, so DNS alone would accept them. `KNOWN_DOMAINS` lists real domains that must never be "corrected" (mail.com, ymail.com, hotmail.co.uk, cloud.com and others); add to it if a real domain gets flagged.
 2. **Reserved domains** (example.com/.net/.org, and endings .test, .example, .invalid, .localhost and .local; RFC 2606 and 6761) and **mistyped endings** (.con, .cmo, .nte, .ogr, .ed and others), with the corrected address as the suggestion.
-3. **Mail servers:** an MX lookup over UDP (TCP when the answer is truncated) to the servers in `TRADELAB_DNS_SERVER`, else `/etc/resolv.conf`, else 1.1.1.1 and 8.8.8.8. A domain that doesn't exist, has no MX records, or publishes a null MX (RFC 7505) is `invalid`. Answers are cached for 10 minutes, and a lookup gives up after 4 seconds.
+3. **Mail servers:** an MX lookup over UDP (TCP when the answer is truncated) to the servers in `TRADELAB_DNS_SERVER`, else `/etc/resolv.conf`, else 1.1.1.1 and 8.8.8.8. A domain that doesn't exist, has no MX records, or publishes a null MX (RFC 7505) is `invalid`, unless DNS also finds no mail servers for gmail.com: some network filters answer "no such domain" for everything, so then the address is `unverified` instead. Answers are cached for 10 minutes, and a lookup gives up after 4 seconds.
 
 A domain with no MX records counts as unable to receive mail, although RFC 5321 allows delivery to its address record; mail providers all publish MX records. None of this proves the mailbox exists or belongs to the person signing up. That needs a confirmation email.
 
@@ -369,10 +390,11 @@ Storage and security:
 - `user_data` table: `user_id` (primary key, references `users`), `data` (the `SavedProgress` JSON), `updated_at`. Created on first start if it's missing; existing rows in other tables are untouched.
 - `password_hash` is `pbkdf2:sha256:1000000$<salt>$<hex>`, Werkzeug's format, so Flask can verify it with `check_password_hash`. Hashes that Werkzeug made (PBKDF2 or scrypt) verify here too.
 - Sign-in looks up the account by email when the login contains @ (usernames can't), and by username otherwise. A failed lookup still does a full hash so response times don't reveal which accounts exist.
-- The session cookie `tradelab_session` is HttpOnly, SameSite=Lax, Path=/, and lasts 7 days. The `sessions` table stores only the SHA-256 of each token, and expired sessions are deleted.
+- The session cookie `tradelab_session` is HttpOnly, SameSite=Lax, Path=/, and lasts 7 days. Flask also marks it Secure when the site is served over HTTPS. The `sessions` table stores only the SHA-256 of each token, and expired sessions are deleted.
 - POST, PUT and DELETE requests whose `Origin` isn't the server's own host get `403 forbidden_origin`. Bodies must be JSON (`415` otherwise) and at most 16 KB (`413`), or 2 MB for `PUT /me/data`.
+- On Flask, each network gets 20 sign-ins per 5 minutes, 20 sign-ups per hour, 120 email checks per 5 minutes and 40 tutor questions per 5 minutes before `429 rate_limited` (`backend/security.py`). Requests from the server's own computer are never limited. Behind a reverse proxy, start the server with `serve.py --behind-proxy` so it sees each visitor's address; `TRADELAB_RATE_LIMITS=off` turns the limits off for load tests.
 
-Moving to Flask: import `AccountStore` from `server/accounts.py` (standard library only) or port it, keep the same messages and codes, and point it at the same `tradelab.db`. Use the session's user id to scope the account, progress and journal endpoints above.
+On Flask, `backend/app.py` defines these routes and opens `tradelab.db` (or `TRADELAB_DB`) on the first account request; `serve.py` opens it at startup instead, so a database problem shows before the first visitor. Use the session's user id to scope the account, progress and journal endpoints above when they move to the server.
 
 ## 5. Data shapes
 
@@ -612,7 +634,7 @@ llama-server -m models/your-model.gguf --host 127.0.0.1 --port 8080 -c 8192
 # add -ngl 99 to offload all layers to a GPU
 ```
 
-Use an instruction-tuned model in GGUF format. A 7B to 8B model at 4-bit quantization is a reasonable start on a laptop; larger models explain better. Keep `--host 127.0.0.1` so only Flask can reach it. `GET http://127.0.0.1:8080/health` answers once the model has loaded, which makes a good readiness check.
+Use an instruction-tuned model in GGUF format. A 7B to 8B model at 4-bit quantization is a reasonable start on a laptop; larger models explain better. Keep `--host 127.0.0.1` so only Flask can reach it. If Flask runs on a different computer, start llama-server with `--host 0.0.0.0` (anyone on that network can then use the model) and set `TRADELAB_LLAMA_URL=http://<model computer's IP>:8080/v1/chat/completions` where Flask runs. `GET http://127.0.0.1:8080/health` answers once the model has loaded, which makes a good readiness check.
 
 ### The Flask route
 
@@ -650,7 +672,7 @@ The conversation auto-scrolls only while the reader is near its bottom. Incremen
 ## 9. Checklist
 
 1. The tutor backend is implemented and runs on the same-origin Flask server.
-2. The account API runs on `python3 scripts/dev_server.py`. Move it into the Flask app (import `AccountStore` from `server/accounts.py`) so one server runs the tutor and sign-in.
+2. The account API runs on the same Flask server (`backend/app.py`).
 3. Implement the market, account, progress and journal endpoints with the shapes above, scoped to the signed-in user, before changing `dataSource` to `'api'`.
 4. Port `js/core/` to Python and run the cases from `tests/core.test.mjs` against the port.
 5. Test the complete API-mode flow once those services have backends: Overview loads; a buy and a sell go through; an order for more than the cash allows shows the server's message under Quantity; Advance 1 day moves prices and the Portfolio chart; a lesson section and its knowledge check save; a journal entry saves, edits and deletes; a reload keeps all of it.

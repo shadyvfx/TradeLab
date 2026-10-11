@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 import requests
 from flask import Flask, Response, jsonify, request, send_from_directory, stream_with_context
+from werkzeug.exceptions import HTTPException
 
 from backend.knowledge_base import (
     KnowledgeBaseError,
@@ -19,6 +20,7 @@ from backend.knowledge_base import (
     retrieve_relevant,
     tokenize,
 )
+from backend.security import init_security
 from server.accounts import MAX_USER_DATA_BYTES, AccountError, AccountStore, DatabaseSetupError
 from server.accounts import GUEST_SESSION_DAYS
 
@@ -27,7 +29,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SYSTEM_PROMPT_PATH = PROJECT_ROOT / "ai_system_prompt.txt"
 LESSON_CONTENT_PATH = PROJECT_ROOT / "server" / "lesson_content.json"
 DATABASE_PATH = os.path.abspath(os.environ.get("TRADELAB_DB") or PROJECT_ROOT / "tradelab.db")
-LLAMA_URL = "http://127.0.0.1:8080/v1/chat/completions"
+# llama-server's chat endpoint. Set TRADELAB_LLAMA_URL when the model runs on
+# another computer, for example http://192.168.1.23:8080/v1/chat/completions.
+LLAMA_URL = os.environ.get("TRADELAB_LLAMA_URL") or "http://127.0.0.1:8080/v1/chat/completions"
 MODEL_LABEL = "Qwen3-8B Q4_K_M"
 SESSION_COOKIE = "tradelab_session"
 GUEST_SESSION_COOKIE = "tradelab_guest"
@@ -48,6 +52,9 @@ LESSON_IDS = frozenset(
     }
 )
 MAX_TUTOR_REQUEST_BYTES = 64 * 1024
+# Account requests are small; saved progress (PUT /api/me/data) may be up to 2 MB.
+# The same limits as scripts/dev_server.py.
+MAX_ACCOUNT_BODY_BYTES = 16 * 1024
 ACCOUNT_STORE_LOCK = threading.Lock()
 MAX_MESSAGE_LENGTH = 1000
 MAX_ASSISTANT_MESSAGE_LENGTH = 4000
@@ -126,14 +133,21 @@ FOLLOW_UP_GENERIC_TERMS = {
 mimetypes.add_type("text/javascript", ".js")
 
 app = Flask(__name__, static_folder=None)
+# The largest body any route accepts (saved progress); the tutor checks its own, smaller limit.
 app.config["MAX_CONTENT_LENGTH"] = MAX_USER_DATA_BYTES + 1024
+# Security headers, rate limits on sign-in, sign-up and the tutor, and reverse-proxy support.
+init_security(app)
 
 
 @app.after_request
 def ensure_api_utf8_charset(response):
     if response.mimetype in {"application/json", "text/event-stream"}:
         response.headers["Content-Type"] = f"{response.mimetype}; charset=utf-8"
-    response.headers["Cache-Control"] = "no-store"
+    if request.path == "/api" or request.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    # Pages, scripts and styles keep Flask's "no-cache": browsers check for a newer
+    # version on every load (a quick 304 when nothing changed) instead of
+    # downloading every file again.
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
 
@@ -161,6 +175,8 @@ def account_api(view):
             return view(*args, **kwargs)
         except AccountError as error:
             return jsonify(error=error.to_dict()), error.status
+        except HTTPException:
+            raise  # 404, 405, 413 and the like keep their own status and JSON message
         except DatabaseSetupError:
             app.logger.exception("The TradeLab account database could not be initialized.")
             return api_error(
@@ -179,9 +195,11 @@ def account_api(view):
     return wrapped
 
 
-def account_json():
+def account_json(limit=MAX_ACCOUNT_BODY_BYTES):
     if not request.is_json:
         raise AccountError(415, "unsupported_media_type", "Send the request body as JSON.")
+    if request.content_length is not None and request.content_length > limit:
+        raise AccountError(413, "payload_too_large", "That request is too large.")
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         raise AccountError(400, "invalid_request", "The request body must be a valid JSON object.")
@@ -459,7 +477,22 @@ def read_system_prompt():
 @app.errorhandler(413)
 def request_too_large(_error):
     del _error
-    return api_error(413, "request_too_large", "The tutor request is too large.")
+    if request.path == "/api/tutor/chat":
+        return api_error(413, "request_too_large", "The tutor request is too large.")
+    return api_error(413, "payload_too_large", "That request is too large.")
+
+
+@app.errorhandler(405)
+def method_not_allowed(error):
+    if request.path == "/api" or request.path.startswith("/api/"):
+        return api_error(405, "method_not_allowed", f"{request.method} isn't supported for {request.path}.")
+    return error
+
+
+@app.get("/api/health")
+def health():
+    """For uptime checks and hosting platforms: the server is up and answering."""
+    return jsonify(status="ok")
 
 
 @app.get("/")
@@ -547,9 +580,7 @@ def get_user_data():
 def put_user_data():
     check_account_origin()
     user = signed_in_user()
-    body = account_json()
-    if request.content_length and request.content_length > MAX_USER_DATA_BYTES + 1024:
-        raise AccountError(413, "payload_too_large", "That request is too large.")
+    body = account_json(limit=MAX_USER_DATA_BYTES + 1024)
     updated_at = account_store().save_user_data(user["id"], body.get("data"))
     return jsonify(updatedAt=updated_at)
 

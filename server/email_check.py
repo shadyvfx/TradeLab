@@ -12,7 +12,10 @@ Standard library only. Checks run cheapest first:
    domain never accepts mail) are rejected.
 
 If DNS can't be reached (offline, or blocked by the network), the address is
-accepted as "unverified" so sign-ups don't break.
+accepted as "unverified" so sign-ups don't break. The same goes for networks
+whose DNS claims that every domain is missing (some filters and captive
+portals do): before rejecting an address, the checker confirms that DNS still
+finds gmail.com's mail servers.
 
 This proves the domain can receive email, not that the mailbox exists or
 belongs to the person signing up. That needs a confirmation email.
@@ -295,6 +298,10 @@ def system_nameservers() -> list[str]:
 # The checker
 
 
+# A domain that always has mail servers. If DNS says it doesn't, DNS is lying.
+CANARY_DOMAIN = "gmail.com"
+
+
 class EmailChecker:
     """Call with a well-formed address (lowercase is fine); returns an EmailCheck.
 
@@ -340,15 +347,27 @@ class EmailChecker:
             return EmailCheck("invalid", f"Did you mean {local}@{fixed}? Email addresses don't end in .{tld}.", f"{local}@{fixed}", domain)
 
         result, records = self._lookup(domain)
+        if result == "ok" and _has_mail_servers(records):
+            return EmailCheck("ok", f"{domain} can receive email.", None, domain)
+        if result == "unknown":
+            return EmailCheck("unverified", "Couldn't reach a DNS server to check this address, so it wasn't verified.", None, domain)
+        if not self._dns_is_trustworthy():
+            return EmailCheck("unverified", "This network's DNS couldn't check this address, so it wasn't verified.", None, domain)
         if result == "nxdomain":
             return EmailCheck("invalid", f"{domain} doesn't exist. Check the spelling of your email address.", None, domain)
-        if result == "ok":
-            if not records:
-                return EmailCheck("invalid", f"{domain} doesn't receive email. Check the spelling, or use a different address.", None, domain)
-            if all(exchange in ("", ".") for _, exchange in records):
-                return EmailCheck("invalid", f"{domain} doesn't accept email. Use a different address.", None, domain)
-            return EmailCheck("ok", f"{domain} can receive email.", None, domain)
-        return EmailCheck("unverified", "Couldn't reach a DNS server to check this address, so it wasn't verified.", None, domain)
+        if not records:
+            return EmailCheck("invalid", f"{domain} doesn't receive email. Check the spelling, or use a different address.", None, domain)
+        return EmailCheck("invalid", f"{domain} doesn't accept email. Use a different address.", None, domain)
+
+    def _dns_is_trustworthy(self) -> bool:
+        """Whether DNS finds mail servers for a domain that certainly has them."""
+        result, records = self._lookup(CANARY_DOMAIN)
+        return result == "ok" and _has_mail_servers(records)
+
+
+def _has_mail_servers(records) -> bool:
+    """At least one real MX record (a null MX, "." or "", means the domain refuses mail)."""
+    return any(exchange not in ("", ".") for _, exchange in records)
 
 
 if __name__ == "__main__":

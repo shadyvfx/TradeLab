@@ -1,0 +1,23 @@
+# TradeLab on a server with a domain name, with HTTPS from Let's Encrypt.
+#
+# Caddy gets and renews the certificate by itself, sends plain-HTTP visitors
+# to HTTPS, compresses responses and passes each request to TradeLab's
+# production server. docs/deployment.md has the full steps.
+#
+# 1. Point your domain at this server (a DNS "A" record) and open ports 80
+#    and 443 in its firewall.
+# 2. Replace tradelab.example.com below with your domain.
+# 3. Start TradeLab:  python3 serve.py --behind-proxy
+#    It listens on 127.0.0.1:5001, so only Caddy can reach it.
+# 4. Start Caddy:     sudo caddy run --config deploy/Caddyfile
+#    With Caddy installed as a service, copy this file to /etc/caddy/Caddyfile
+#    and run: sudo systemctl reload caddy
+
+tradelab.example.com {
+	encode zstd gzip
+
+	reverse_proxy 127.0.0.1:5001 {
+		# Pass each word of a tutor answer on as soon as TradeLab writes it.
+		flush_interval -1
+	}
+}

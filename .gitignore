@@ -8,3 +8,8 @@ __pycache__/
 *.pyc
 .DS_Store
 node_modules/
+
+# HTTPS certificates and private keys: never commit them.
+# (serve.py keeps the ones it makes in ~/.tradelab/certs, outside this folder.)
+*.pem
+*.key

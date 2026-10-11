@@ -1,28 +1,75 @@
 # TradeLab frontend
 
-TradeLab teaches beginners how the stock market works: interactive lessons, paper trading with virtual money, a portfolio view, a trading journal and a tutor. The local Flask server serves the frontend, account API backed by SQLite, and tutor API for a local Qwen model. Every price is simulated and every dollar is virtual.
+TradeLab teaches beginners how the stock market works: interactive lessons, paper trading with virtual money, a portfolio view, a trading journal and a tutor. This repository is the frontend plus a small **Flask backend** that serves the site, handles sign-up, sign-in and guest limits (saved in a SQLite database), delivers the account-only lessons, and answers tutor questions with a local Qwen model. Every price is simulated and every dollar is virtual.
 
-Built with HTML, CSS and vanilla JavaScript (ES modules). Chart.js is the only third-party frontend code, and it is vendored. The standalone account server uses only Python's standard library; Flask and its tutor-backend dependencies are listed in `requirements.txt`.
+Built with HTML, CSS and vanilla JavaScript (ES modules). Chart.js is the only third-party frontend code, and it is vendored. The backend's Python dependencies are listed in `requirements.txt`; the account code itself (`server/`) uses only Python's standard library.
 
 ## Run it locally
 
-ES modules don't load from `file://`, so serve the folder over HTTP.
+### The demo on a Mac: double-click `Start TradeLab Demo.command`
 
-For the website, SQLite accounts, and local tutor API on the same origin, activate the existing environment, install the Python requirements, and run Flask:
+It runs the whole app (website, sign-in, guest limits and the Qwen tutor) on TradeLab's production server at http://127.0.0.1:5001:
+
+1. The first time, it installs the server's packages into `~/.tradelab-demo/venv` (nothing else on the Mac changes). It does this again after `requirements.txt` changes, which needs internet once.
+2. It finds the computer running llama-server on your network: any computer answering on port 8080, or the address saved in `~/.tradelab-demo/model-url.txt`. That computer must start llama-server with `--host 0.0.0.0`, and both computers must be on the same Wi-Fi.
+3. It checks that the model answers, then opens the site. Leave its window open during the demo; Control-C or closing the window stops TradeLab.
+
+The same thing by hand, from this folder:
+
+```bash
+python3 -m pip install -r requirements.txt
+python3 serve.py                                   # http://localhost:5001
+python3 serve.py --model-url 192.168.1.23:8080     # when the model runs on another computer
+```
+
+On Windows (PowerShell), with the project's virtual environment:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-python -m flask --app backend.app run --host 127.0.0.1 --port 5000
+python serve.py
 ```
 
-Open http://127.0.0.1:5000. To use the AI tutor, also start `llama-server` with your local Qwen GGUF model on port 8080; see [docs/integration.md](docs/integration.md) for the command. The account database is `tradelab.db` in this folder, created on first account request. Set `TRADELAB_DB` to use a different database file.
-
-To run only the frontend with prewritten tutor answers and no server-backed accounts, use `npm run dev` (Node 18+). The standard-library Python server remains available with `python scripts/dev_server.py` when you want accounts but not the Qwen tutor.
+Open http://127.0.0.1:5001 (port 5001, because macOS uses 5000 for AirPlay). To use the AI tutor, also start `llama-server` with your local Qwen GGUF model on port 8080; see [docs/integration.md](docs/integration.md) for the command. The account database is `tradelab.db` in this folder, created on first run; set `TRADELAB_DB` to use a different file. While changing the backend, Flask's development server works too: `python -m flask --app backend.app run --host 127.0.0.1 --port 5000 --debug` (on a Mac, use port 5001).
 
 Keep `dataSource: 'mock'` in `js/config.js`; `tutorApiEnabled: true` is the default and enables the Flask/Qwen tutor. Set it to `false` for prewritten tutor answers.
 
-Run the tests. The Node tests and the account server tests need nothing installed; the tutor backend tests need the packages in `requirements.txt`:
+### HTTPS and hosting
+
+`serve.py` is TradeLab's production server ([Hypercorn](https://hypercorn.readthedocs.io/), on macOS, Linux and Windows). It handles HTTPS itself, adds security headers and rate limits sign-in, sign-up and the tutor. [docs/deployment.md](docs/deployment.md) has the steps for each setup:
+
+```bash
+python3 serve.py --https --host 0.0.0.0     # HTTPS for phones and laptops on your Wi-Fi: https://<this computer>:8443
+python3 serve.py --behind-proxy             # behind Caddy on a server with a domain (deploy/Caddyfile, deploy/tradelab.service)
+```
+
+With `--https` alone, it makes a certificate for this computer, signed by a certificate authority it creates in `~/.tradelab/certs`. Browsers warn until you trust that authority on each device; the guide shows how.
+
+### Without the Qwen tutor
+
+Neither of these servers needs any packages:
+
+```bash
+# Python 3.8 or newer: the whole app, including accounts, guest limits and every lesson
+python3 scripts/dev_server.py    # http://127.0.0.1:5173
+
+# Node 18 or newer: the frontend only, without accounts (frontend work only)
+npm run dev                      # http://127.0.0.1:5173
+```
+
+With either one, turn off the local tutor in `js/config.js` first, so the tutor uses its prewritten answers:
+
+```js
+tutorApiEnabled: false,
+```
+
+`npm run server` starts the Python account server too. Use another port with `python3 scripts/dev_server.py 8000` or `npm run dev -- 8000`. Both servers send the right MIME type for `.js` files (some Windows setups otherwise break module loading) and disable caching so edits show up on refresh. On Windows, type `python` instead of `python3`.
+
+Flask and the Python server save accounts in the same `tradelab.db` in this folder, and create the file on first run. When you use the Node server, the Account page says that accounts need the TradeLab server.
+
+### Tests
+
+The Node tests and the account server tests need nothing installed; the tutor backend tests need the packages in `requirements.txt`:
 
 ```bash
 npm test                                   # business rules, sign-up rules and the tutor frontend (Node)
@@ -68,10 +115,12 @@ Search with **Ctrl+K**, **Cmd+K** or **/** to jump to any page, simulated stock 
 tradelab/
   index.html                 App shell, early theme script, script and style tags
   package.json               npm scripts (dev, test); no dependencies
-  requirements.txt           Flask and requests for the local tutor backend
+  requirements.txt           Flask, requests and pypdf for the backend; Hypercorn and cryptography for serve.py
+  serve.py                   Production server: HTTPS, HTTP/2, proxy support, access log (docs/deployment.md)
   ai_system_prompt.txt       Local Qwen tutor behavior and safety instructions
   backend/
-    app.py                   Flask tutor endpoint and same-origin frontend server
+    app.py                   Flask server: the site, accounts, guest limits, lessons and the tutor
+    security.py              Security headers, Content-Security-Policy, rate limits, reverse-proxy support
   assets/
     icons/favicon.svg
     fonts/                   Archivo variable font (self-hosted) + license
@@ -99,17 +148,24 @@ tradelab/
     utils/                   Safe HTML templating, formatting, a small Markdown renderer
   docs/
     integration.md           Flask tutor setup and future API contracts
+    deployment.md            Running in production: HTTPS on your network, a domain with Caddy, hosting platforms
     mobile.md                What carries over to a mobile app and what doesn't
   server/accounts.py         Sign-up rules, password hashing, the SQLite user database, saved progress
   server/lesson_content.json Full course content delivered by Flask after access checks
   server/email_check.py      Email checker: provider typos, reserved domains, DNS MX lookup
   scripts/                   Zero-dependency servers: dev_server.py (app + accounts), dev-server.mjs (app only)
+  Start TradeLab Demo.command  Mac launcher for the demo: installs, finds the model, starts serve.py
+  deploy/                    Caddyfile (automatic HTTPS for a domain) and tradelab.service (Linux service)
   tests/
     core.test.mjs            Unit tests for core/, the mock data and the sign-up rules
+    guest-limits.test.mjs    Guest limits in the frontend: simulation days and journal entries come from the server
     tutor-*.test.mjs         Tutor frontend: mock replies, the local API client, streaming
     typewriter.test.mjs      Typewriter animation for prewritten replies
     test_accounts.py         Unit tests for the account server and database
-    test_backend.py          Flask tutor endpoint and static-file tests
+    test_flask_accounts.py   The account API on Flask: progress, origins, sizes, private files
+    test_security.py         Security headers, the page's Content-Security-Policy, rate limits
+    test_production.py       serve.py over real HTTPS: accounts, streaming tutor, redirects, proxies, certificates
+    test_backend.py          Flask tutor, accounts, guest limits, lessons and static files
     test_knowledge_base.py   Knowledge library tests
     account-cases.json       Sign-up cases both test suites check, so browser and server agree
   tradelab.db                The user database (created by the Python server; not in git)
@@ -171,6 +227,7 @@ How it works:
 - If `tradelab.db` already has a `users` table (`id`, `display_name`, `email`, `password_hash`, `created_at`), the server adds a `username` column and leaves existing rows alone. Those accounts sign in with their email. New accounts get the username in both `username` and `display_name`.
 - Signing in sets an HttpOnly, SameSite=Lax session cookie that lasts 7 days. The `sessions` table stores only a hash of each session token.
 - The server refuses requests from other websites that would change anything (signing up, in or out, or saving progress), and never serves the database, its own code or dotfiles such as `.git`.
+- On Flask, too many sign-ins, sign-ups or tutor questions from one network get "wait a few minutes" (`429`), so passwords can't be guessed quickly. The limits are in [docs/deployment.md](docs/deployment.md#security).
 - **Settings > Start over** (signed in) resets your account's progress; **Clear all local demo data** (signed out) resets the guest copy. Neither deletes accounts.
 
 See every account (never the passwords), and when each one last saved progress, from this folder with:
@@ -381,8 +438,8 @@ See [docs/integration.md](docs/integration.md) for the remaining endpoint list a
 - **Guest data is browser-only.** Signed out, progress lives in this browser's `localStorage`, which is not a secure or permanent store; clearing site data resets it. Signed in, it's saved to your account on the server.
 - **Guest limits use a server cookie.** The SQLite database stores only a hash of the random guest token and its simulation/journal counters; it does not store guest journal text or simulated trades. The cookie lasts 365 days, but clearing it starts a new anonymous session and allowance.
 - **Course content is protected at delivery.** The three guest lessons are public frontend content; other lesson bodies live in `server/lesson_content.json` and are returned only to a signed-in account by Flask. Catalog titles and summaries remain public.
-- **Accounts are a local prototype.** No confirmation emails, password reset or rate limiting on sign-in. The email checker confirms the domain receives mail, not the mailbox. The Python server listens only on 127.0.0.1 over plain HTTP; a public deployment needs HTTPS and a production server.
-- **One server for the full local experience.** Flask serves the frontend, local tutor API, and SQLite-backed sign-in and account progress. The standard-library account server is still available if you do not need the tutor.
+- **No confirmation emails or password reset.** The email checker confirms the domain receives mail, not the mailbox. Sign-in, sign-up, the email checker and the tutor are rate limited on Flask (`serve.py`), but not on `scripts/dev_server.py`, which is for development only.
+- **One server for the full local experience.** Flask serves the frontend, local tutor API, guest limits, and SQLite-backed sign-in and account progress. The standard-library account server is still available if you do not need the tutor.
 - **Market orders only.** Limit and stop orders, fractional shares, short selling, fees, dividends and a bid/ask spread are not simulated yet. The order lesson says so.
 - **Other backend services.** The market, trading, progress and journal API endpoints are not implemented; those features run on mock data, saved to your account when you're signed in.
 - **Tutor preview.** With the local tutor off, the tutor answers a fixed set of prewritten topics; anything else gets an honest "I don't have an answer for that yet".

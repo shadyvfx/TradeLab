@@ -1,3 +1,5 @@
 Flask>=3.0,<4.0
 requests>=2.31,<3.0
 pypdf>=5.0,<7.0
+hypercorn>=0.17,<0.19   # production server with HTTPS (serve.py); 0.17 for Python 3.9
+cryptography>=42        # serve.py --https makes a certificate for this computer

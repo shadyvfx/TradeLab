@@ -1,0 +1,50 @@
+# Runs TradeLab as a service on a Linux server, behind Caddy (deploy/Caddyfile).
+# It starts when the server boots and restarts if it ever stops. Setup, as root
+# (docs/deployment.md explains each step):
+#
+#   useradd --system --home-dir /opt/tradelab --shell /usr/sbin/nologin tradelab
+#   git clone https://github.com/shadyvfx/InvestIQ /opt/tradelab
+#   python3 -m venv /opt/tradelab/.venv
+#   /opt/tradelab/.venv/bin/pip install -r /opt/tradelab/requirements.txt
+#   cp /opt/tradelab/deploy/tradelab.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now tradelab
+#
+# Its log:  journalctl -u tradelab -f
+
+[Unit]
+Description=TradeLab (financial education and simulated trading)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tradelab
+Group=tradelab
+WorkingDirectory=/opt/tradelab
+# Accounts live outside the code, in /var/lib/tradelab (made by StateDirectory below).
+Environment=TRADELAB_DB=/var/lib/tradelab/tradelab.db
+# Where llama-server answers. Keep it private: never open its port to the internet.
+Environment=TRADELAB_LLAMA_URL=http://127.0.0.1:8080/v1/chat/completions
+ExecStart=/opt/tradelab/.venv/bin/python serve.py --behind-proxy --host 127.0.0.1 --port 5001
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+
+# The service can write only to its own data folder.
+StateDirectory=tradelab
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

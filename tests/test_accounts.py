@@ -37,6 +37,7 @@ from server.accounts import (  # noqa: E402
     verify_password,
 )
 from server.email_check import (  # noqa: E402
+    CANARY_DOMAIN,
     EmailCheck,
     EmailChecker,
     build_query,
@@ -229,7 +230,8 @@ class StoreTests(unittest.TestCase):
             self.store.migrate()
 
     def test_rejects_an_email_that_cannot_receive_mail(self):
-        store = AccountStore(self.path, iterations=FAST, email_checker=EmailChecker(lookup=lambda domain: ("nxdomain", [])))
+        only_gmail = lambda domain: ("ok", [(5, "gmail-smtp-in.l.google.com")]) if domain == CANARY_DOMAIN else ("nxdomain", [])  # noqa: E731
+        store = AccountStore(self.path, iterations=FAST, email_checker=EmailChecker(lookup=only_gmail))
         store.migrate()
         with self.assertRaises(AccountError) as caught:
             store.create_user("ay_0b", "ay@gnail.com", "Tr@deLab1")
@@ -243,12 +245,12 @@ class StoreTests(unittest.TestCase):
 
 
 class EmailCheckerTests(unittest.TestCase):
-    def checker(self, result=("ok", [(10, "mx.mail.test")])):
+    def checker(self, result=("ok", [(10, "mx.mail.test")]), canary=("ok", [(5, "gmail-smtp-in.l.google.com")])):
         calls = []
 
         def lookup(domain):
             calls.append(domain)
-            return result
+            return canary if domain == CANARY_DOMAIN else result
 
         checker = EmailChecker(lookup=lookup)
         checker.calls = calls
@@ -308,6 +310,14 @@ class EmailCheckerTests(unittest.TestCase):
         self.assertIn("doesn't receive email", no_mail.message)
         null_mx = self.checker(("ok", [(0, "")]))("a@no-mail-ever.com")
         self.assertIn("doesn't accept email", null_mx.message)
+
+    def test_dns_that_says_nothing_exists_does_not_block_sign_up(self):
+        # Some network filters answer "no such domain" for everything, gmail.com included.
+        for answer in [("nxdomain", []), ("ok", [])]:
+            result = self.checker(answer, canary=answer)("a@real-domain.com")
+            self.assertEqual(result.status, "unverified", answer)
+            self.assertTrue(result.ok)
+        self.assertEqual(self.checker(("nxdomain", []), canary=("nxdomain", []))("a@gmail.com").status, "unverified")
 
     def test_unreachable_dns_does_not_block_sign_up(self):
         result = self.checker(("unknown", []))("a@real-domain.com")
