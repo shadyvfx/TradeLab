@@ -12,6 +12,9 @@
 # the first run after requirements.txt changes, installs the server's packages
 # into ~/.tradelab-demo/venv. Nothing is installed anywhere else.
 
+# Everything runs inside main(), which bash reads in full before running it,
+# so replacing this file while TradeLab runs can't confuse the running copy.
+main() {
 cd "$(dirname "$0")" || exit 1
 DEMO_HOME="$HOME/.tradelab-demo"
 VENV="$DEMO_HOME/venv"
@@ -36,7 +39,7 @@ stop_server() {
     kill "$SERVER_PID" 2>/dev/null
     wait "$SERVER_PID" 2>/dev/null
     SERVER_PID=""
-    printf '\nTradeLab stopped.\n'
+    [ "$1" = "quiet" ] || printf '\nTradeLab stopped.\n'
   fi
 }
 trap 'stop_server; exit 0' INT TERM HUP
@@ -68,6 +71,8 @@ fi
 ok "Packages ready"
 
 # -- 2. The AI model -----------------------------------------------------------
+# Only a quick look: TradeLab opens either way, and if the model isn't found
+# you can type its computer's address once the site is open (step 4).
 
 model_ok() { curl -s -m 2 "$1/health" 2>/dev/null | grep -q '"ok"'; }
 
@@ -109,42 +114,40 @@ if [ -z "$MODEL" ]; then
   fi
 fi
 
-if [ -z "$MODEL" ]; then
-  warn "Couldn't find the AI model on your network."
-  GATEWAY="$(route -n get default 2>/dev/null | awk '/gateway:/ {print $2}')"
-  if [ -n "$GATEWAY" ] && curl -sS -m 2 -o /dev/null "http://$GATEWAY/" 2>&1 | grep -q "No route to host"; then
-    warn "macOS is blocking Terminal from your local network. Open System Settings > Privacy & Security > Local Network, turn on Terminal, then double-click this file again."
-  fi
-  printf '    On the computer running the model, start llama-server with --host 0.0.0.0\n'
-  printf '    (not --host 127.0.0.1) so this Mac can reach it, allow it through that\n'
-  printf '    computer'"'"'s firewall, and keep both computers on the same Wi-Fi.\n'
-  if [ -t 0 ]; then
-    printf '\n    If you know that computer'"'"'s IP address, type it and press Return\n'
-    printf '    (for example 192.168.1.23). Or just press Return to go on without the tutor.\n    > '
-    ENTERED=""
-    read -r -t 120 ENTERED
-    ENTERED="$(printf '%s' "$ENTERED" | tr -d '[:space:]')"
-    if [ -n "$ENTERED" ]; then
-      case "$ENTERED" in http://* | https://*) ;; *) ENTERED="http://$ENTERED" ;; esac
-      case "${ENTERED#*://}" in *:*) ;; *) ENTERED="$ENTERED:$MODEL_PORT" ;; esac
-      if model_ok "$ENTERED"; then
-        MODEL="$ENTERED"
-      else
-        warn "Nothing answered at $ENTERED. Check that llama-server is running there with --host 0.0.0.0."
-      fi
-    fi
-  fi
-fi
-
 if [ -n "$MODEL" ]; then
   printf '%s\n' "$MODEL" > "$MODEL_FILE"
   ok "Found the model at $MODEL"
 else
-  warn "Going on without the AI model: the site will open, but the tutor won't answer."
-  printf '    Fix the model computer, then double-click this file again.\n'
+  warn "Couldn't find the AI model on your network. TradeLab will open without the tutor for now."
 fi
 
 # -- 3. The TradeLab server ----------------------------------------------------
+
+start_server() {
+  if [ -n "$MODEL" ]; then
+    export TRADELAB_LLAMA_URL="$MODEL/v1/chat/completions"
+  else
+    unset TRADELAB_LLAMA_URL
+  fi
+  # The production server (serve.py): the same one used for HTTPS and hosting.
+  "$VENV/bin/python" serve.py --host 127.0.0.1 --port "$PORT" >> "$LOG" 2>&1 &
+  SERVER_PID=$!
+  # /api/health answers once the server is up; serve.py has opened the user
+  # database by then. (Polling /api/session would start a guest session each time.)
+  for _ in $(seq 1 40); do
+    if curl -s -m 1 "$SITE/api/health" 2>/dev/null | grep -q '"ok"'; then
+      return 0
+    fi
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+      SERVER_PID=""
+      printf '\n'
+      tail -n 15 "$LOG"
+      fail "The TradeLab server stopped while starting (details above)."
+    fi
+    sleep 0.5
+  done
+  fail "TradeLab didn't start. See $LOG for details."
+}
 
 step "3. Starting TradeLab"
 # A TradeLab server left running from an earlier start is restarted, so it
@@ -166,38 +169,19 @@ while [ "$PORT" -lt 5011 ]; do
 done
 SITE="http://127.0.0.1:$PORT"
 
-if [ -n "$MODEL" ]; then
-  export TRADELAB_LLAMA_URL="$MODEL/v1/chat/completions"
-fi
-# The production server (serve.py): the same one used for HTTPS and hosting.
-"$VENV/bin/python" serve.py --host 127.0.0.1 --port "$PORT" > "$LOG" 2>&1 &
-SERVER_PID=$!
-
-# /api/health answers once the server is up; serve.py has opened the user
-# database by then. (Polling /api/session would start a guest session each time.)
-for _ in $(seq 1 40); do
-  if curl -s -m 1 "$SITE/api/health" 2>/dev/null | grep -q '"ok"'; then
-    break
-  fi
-  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-    SERVER_PID=""
-    printf '\n'
-    tail -n 15 "$LOG"
-    fail "The TradeLab server stopped while starting (details above)."
-  fi
-  sleep 0.5
-done
-curl -s -m 2 "$SITE/api/health" 2>/dev/null | grep -q '"ok"' || fail "TradeLab didn't start. See $LOG for details."
+: > "$LOG"
+start_server
 ok "Website and sign-in are running at $SITE"
+[ "$(uname)" = "Darwin" ] && open "$SITE"
 
-# -- 4. A test question for the model -------------------------------------------
-# Asked straight to llama-server: TradeLab's tutor only answers signed-in
-# accounts, and this checks the part most likely to fail, the network path to
-# the model computer.
+# -- 4. The AI tutor -------------------------------------------------------------
 
+step "4. The AI tutor"
 if [ -n "$MODEL" ]; then
-  step "4. Asking the model a test question"
-  printf '  (the first answer can take a little while)\n'
+  # Asked straight to llama-server: TradeLab's tutor only answers signed-in
+  # accounts, and this checks the part most likely to fail, the network path
+  # to the model computer.
+  printf '  Asking the model a test question (the first answer can take a little while)...\n'
   ANSWER="$(curl -s -m 150 -X POST "$MODEL/v1/chat/completions" -H 'Content-Type: application/json' \
     -d '{"messages":[{"role":"user","content":"In one sentence, what is a stock?"}],"max_tokens":80,"temperature":0.4,"chat_template_kwargs":{"enable_thinking":false}}')"
   "$VENV/bin/python" - "$ANSWER" <<'PY'
@@ -212,9 +196,40 @@ except (ValueError, KeyError, IndexError, TypeError):
     print("  \033[33m!\033[0m The model didn't answer the test question in time. The tutor may be slow or unavailable.")
     sys.exit(0)
 text = " ".join(re.sub(r"<think>.*?</think>", "", text, flags=re.S).split())
-print("  \033[32m\u2713\033[0m The model answered: " + (text[:120] + "..." if len(text) > 120 else text))
+print("  \033[32m✓\033[0m The model answered: " + (text[:120] + "..." if len(text) > 120 else text))
 print("    Sign in on the site to use the tutor: it answers signed-in accounts only.")
 PY
+else
+  warn "The tutor isn't connected; everything else on the site works."
+  GATEWAY="$(route -n get default 2>/dev/null | awk '/gateway:/ {print $2}')"
+  if [ -n "$GATEWAY" ] && curl -sS -m 2 -o /dev/null "http://$GATEWAY/" 2>&1 | grep -q "No route to host"; then
+    warn "macOS is blocking Terminal from your local network. Open System Settings > Privacy & Security > Local Network, turn on Terminal, then double-click this file again."
+  fi
+  printf '    On the computer running the model, start llama-server with --host 0.0.0.0\n'
+  printf '    (not --host 127.0.0.1) so this Mac can reach it, allow it through that\n'
+  printf '    computer'"'"'s firewall, and keep both computers on the same Wi-Fi.\n'
+  if [ -t 0 ]; then
+    while :; do
+      printf '\n    To connect the tutor, type that computer'"'"'s IP address and press Return\n'
+      printf '    (for example 192.168.1.23). The site is already open; you can leave this.\n    > '
+      ENTERED=""
+      read -r ENTERED || break
+      ENTERED="$(printf '%s' "$ENTERED" | tr -d '[:space:]')"
+      [ -n "$ENTERED" ] || break
+      case "$ENTERED" in http://* | https://*) ;; *) ENTERED="http://$ENTERED" ;; esac
+      case "${ENTERED#*://}" in *:*) ;; *) ENTERED="$ENTERED:$MODEL_PORT" ;; esac
+      if model_ok "$ENTERED"; then
+        MODEL="${ENTERED%/}"
+        printf '%s\n' "$MODEL" > "$MODEL_FILE"
+        printf '  Restarting TradeLab with the tutor...\n'
+        stop_server quiet
+        start_server
+        ok "The tutor is connected to $MODEL. Reload the page in your browser."
+        break
+      fi
+      warn "Nothing answered at $ENTERED. Check that llama-server is running there with --host 0.0.0.0."
+    done
+  fi
 fi
 
 if [ ! -s knowledge_base/index.json ]; then
@@ -223,9 +238,11 @@ if [ ! -s knowledge_base/index.json ]; then
   printf '  from the other computer into this folder'"'"'s knowledge_base folder.\n'
 fi
 
-[ "$(uname)" = "Darwin" ] && open "$SITE"
-printf '\n\033[1mTradeLab is open at %s\033[0m\n' "$SITE"
+printf '\n\033[1mTradeLab is running at %s\033[0m\n' "$SITE"
 printf 'Leave this window open during your demo. To stop, press Control-C or close it.\n'
 printf 'Server log: %s\n' "$LOG"
 wait "$SERVER_PID"
 SERVER_PID=""
+}
+
+main "$@"; exit $?

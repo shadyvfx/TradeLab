@@ -12,7 +12,7 @@ It runs the whole app (website, sign-in, guest limits and the Qwen tutor) on Tra
 
 1. The first time, it installs the server's packages into `~/.tradelab-demo/venv` (nothing else on the Mac changes). It does this again after `requirements.txt` changes, which needs internet once.
 2. It finds the computer running llama-server on your network: any computer answering on port 8080, or the address saved in `~/.tradelab-demo/model-url.txt`. That computer must start llama-server with `--host 0.0.0.0`, and both computers must be on the same Wi-Fi.
-3. It checks that the model answers, then opens the site. Leave its window open during the demo; Control-C or closing the window stops TradeLab.
+3. It opens the site right away, then checks that the model answers. If it didn't find the model, the site works without the tutor, and you can type the model computer's IP address in the launcher's window to connect it. Leave that window open during the demo; Control-C or closing the window stops TradeLab.
 
 The same thing by hand, from this folder:
 
